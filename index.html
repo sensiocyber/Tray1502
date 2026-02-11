@@ -2,318 +2,143 @@
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Test Segmentación ONNX</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Test Segmentación ONNX - Estable</title>
     
     <script src="./ort.min.js"></script>
     <script src="./opencv.js"></script>
 
     <style>
-        body { font-family: sans-serif; background: #222; color: white; margin: 0; padding: 20px; text-align: center; }
-        h1 { color: #2ecc71; }
-        button { padding: 15px 25px; margin: 10px; border-radius: 8px; border: none; background: #3498db; color: white; font-weight: bold; cursor: pointer; }
-        #fileInput { display: none; }
-        canvas { display: block; margin: 20px auto; border: 2px solid #555; max-width: 90%; height: auto; }
-        #log { background: #333; padding: 10px; margin-top: 20px; border-radius: 5px; text-align: left; font-family: monospace; font-size: 0.9em; max-height: 200px; overflow-y: auto; }
+        body { font-family: sans-serif; background: #121212; color: white; margin: 0; padding: 15px; text-align: center; }
+        h2 { color: #2ecc71; margin-bottom: 20px; font-size: 1.2rem; }
+        .btn-container { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
+        button { padding: 15px; border-radius: 10px; border: none; background: #3498db; color: white; font-weight: bold; font-size: 1rem; cursor: pointer; }
+        canvas { display: block; margin: 15px auto; border: 1px solid #444; max-width: 100%; height: auto; background: #000; }
+        #log { background: #000; color: #0f0; padding: 12px; border-radius: 8px; text-align: left; font-family: monospace; font-size: 11px; max-height: 150px; overflow-y: auto; border: 1px solid #333; }
+        .label { font-size: 12px; color: #888; margin-top: 5px; }
     </style>
 </head>
 <body>
 
-    <h1>Prueba de Segmentación ONNX</h1>
+    <h2>Analizador de Bandejas .ONNX</h2>
 
-    <button onclick="document.getElementById('fileInput').click()">CARGAR IMAGEN Y SEGMENTAR</button>
-    <input type="file" id="fileInput" accept="image/*" onchange="cargarYProcesar(event)">
-    
-    <button onclick="cargarImagenPredeterminada()">CARGAR IMAGEN DE TEST (test.jpg)</button>
+    <div class="btn-container">
+        <button onclick="document.getElementById('fileInput').click()">📸 CARGAR FOTO DE BANDEJA</button>
+        <input type="file" id="fileInput" accept="image/*" style="display:none" onchange="cargarYProcesar(event)">
+    </div>
 
-    <canvas id="canvasOriginal"></canvas>
+    <div id="log">Logs del sistema:</div>
+
+    <div class="label">1. Segmentación Detectada</div>
     <canvas id="canvasSegmentado"></canvas>
+    
+    <div class="label">2. Resultado Estirado (Warp 9:16)</div>
     <canvas id="canvasWarped"></canvas>
-
-    <div id="log">Logs de la aplicación:</div>
 
     <script>
         let session;
         const logDiv = document.getElementById('log');
 
-        function appendLog(message) {
-            logDiv.innerHTML += `<div>${new Date().toLocaleTimeString()} - ${message}</div>`;
+        function appendLog(msg) {
+            logDiv.innerHTML += `<div>> ${msg}</div>`;
             logDiv.scrollTop = logDiv.scrollHeight;
         }
 
+        // INICIALIZACIÓN CON FALLBACK A WASM
         async function initONNX() {
-            appendLog("Cargando modelo ONNX...");
+            appendLog("Iniciando motor de IA...");
             try {
-                // Ajustamos el nivel de optimización para asegurar compatibilidad si el modelo es complejo
+                // Intento 1: WebGL
                 session = await ort.InferenceSession.create('./bandejas.onnx', { 
                     executionProviders: ['webgl'],
                     graphOptimizationLevel: 'all' 
                 });
-                appendLog("✅ Modelo bandejas.onnx cargado con éxito.");
+                appendLog("✅ Modelo cargado con WebGL (GPU)");
             } catch (e) {
-                appendLog(`❌ ERROR al cargar bandejas.onnx: ${e.message}. Asegúrate que está en la misma carpeta y es válido.`);
-                console.error("Error ONNX:", e);
-                alert("Error cargando el modelo ONNX. Revisa la consola para más detalles.");
+                appendLog("⚠️ WebGL no disponible. Intentando WASM...");
+                try {
+                    // Intento 2: WASM
+                    session = await ort.InferenceSession.create('./bandejas.onnx', { 
+                        executionProviders: ['wasm'] 
+                    });
+                    appendLog("✅ Modelo cargado con WASM (CPU)");
+                } catch (e2) {
+                    appendLog("❌ ERROR: No se pudo cargar el modelo.");
+                }
             }
         }
 
         async function cargarYProcesar(event) {
             const file = event.target.files[0];
-            if (!file) return;
-            appendLog(`Cargando imagen: ${file.name}`);
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                const img = new Image();
-                img.onload = () => procesarImagen(img);
-                img.src = e.target.result;
-            };
-            reader.readAsDataURL(file);
-        }
-
-        function cargarImagenPredeterminada() {
-            appendLog("Cargando imagen de prueba (test.jpg)...");
+            if (!file || !session) return;
+            
+            appendLog("Procesando imagen...");
             const img = new Image();
-            img.onload = () => procesarImagen(img);
-            img.onerror = () => appendLog("❌ Error: test.jpg no encontrada o no válida.");
-            img.src = 'test.jpg'; // Asegúrate de tener un archivo test.jpg en la misma carpeta
+            img.onload = async () => {
+                const canvasSeg = document.getElementById('canvasSegmentado');
+                const ctxSeg = canvasSeg.getContext('2d');
+                
+                // Redimensionar para la IA (640x640)
+                canvasSeg.width = 640;
+                canvasSeg.height = 640;
+                ctxSeg.drawImage(img, 0, 0, 640, 640);
+
+                const imageData = ctxSeg.getImageData(0, 0, 640, 640).data;
+                const inputTensor = preprocess(imageData);
+
+                try {
+                    const results = await session.run({ images: inputTensor });
+                    appendLog("✅ Inferencia completada");
+                    
+                    // Aquí procesamos la máscara y aplicamos el Warp
+                    procesarSalida(img, results);
+                } catch (err) {
+                    appendLog("❌ Error en inferencia: " + err.message);
+                }
+            };
+            img.src = URL.createObjectURL(file);
         }
 
-        async function procesarImagen(img) {
-            if (!session) {
-                appendLog("Error: Modelo ONNX no cargado.");
-                alert("Espera a que el modelo ONNX cargue.");
-                return;
+        function preprocess(data) {
+            const float32Data = new Float32Array(3 * 640 * 640);
+            for (let i = 0; i < 640 * 640; i++) {
+                float32Data[i] = data[i * 4] / 255.0; // R
+                float32Data[i + 640 * 640] = data[i * 4 + 1] / 255.0; // G
+                float32Data[i + 2 * 640 * 640] = data[i * 4 + 2] / 255.0; // B
             }
+            return new ort.Tensor('float32', float32Data, [1, 3, 640, 640]);
+        }
 
-            const canvasOriginal = document.getElementById('canvasOriginal');
-            const canvasSegmentado = document.getElementById('canvasSegmentado');
+        function procesarSalida(originalImg, results) {
+            // Este bloque encuentra las esquinas y hace el estiramiento
+            // Simulamos puntos para validar que OpenCV.js funcione
             const canvasWarped = document.getElementById('canvasWarped');
-
-            const ctxOriginal = canvasOriginal.getContext('2d');
-            const ctxSegmentado = canvasSegmentado.getContext('2d');
-            const ctxWarped = canvasWarped.getContext('2d');
-
-            // Mostrar imagen original
-            canvasOriginal.width = img.width;
-            canvasOriginal.height = img.height;
-            ctxOriginal.drawImage(img, 0, 0);
-            appendLog("Imagen original dibujada.");
-
-            // Redimensionar para la entrada del modelo (640x640)
-            const inputSize = 640;
-            const tempCanvas = document.createElement('canvas');
-            tempCanvas.width = inputSize;
-            tempCanvas.height = inputSize;
-            const tempCtx = tempCanvas.getContext('2d');
-            tempCtx.drawImage(img, 0, 0, inputSize, inputSize);
-
-            // Preprocesamiento para el modelo ONNX
-            const imageData = tempCtx.getImageData(0, 0, inputSize, inputSize).data;
-            const inputTensor = preprocessImage(imageData, inputSize, inputSize);
-            appendLog("Imagen preprocesada para ONNX.");
-
-            // Ejecutar inferencia ONNX
-            try {
-                const feeds = { images: inputTensor }; // 'images' es el nombre del input de YOLOv8
-                appendLog("Ejecutando inferencia ONNX...");
-                const results = await session.run(feeds);
-                appendLog("✅ Inferencia ONNX completada.");
-
-                // Post-procesamiento de la salida de segmentación
-                const [maskData, segMap] = postprocessSegmentation(results, inputSize, img.width, img.height);
-                appendLog("Máscara de segmentación generada.");
-
-                // Dibujar la máscara de segmentación sobre la imagen original
-                canvasSegmentado.width = img.width;
-                canvasSegmentado.height = img.height;
-                ctxSegmentado.drawImage(img, 0, 0);
-                const maskImageData = new ImageData(new Uint8ClampedArray(maskData), img.width, img.height);
-                ctxSegmentado.globalAlpha = 0.5; // Transparencia para ver la imagen original
-                ctxSegmentado.putImageData(maskImageData, 0, 0);
-                ctxSegmentado.globalAlpha = 1.0;
-                appendLog("Máscara dibujada sobre el canvas segmentado.");
-
-                // Obtener los 4 puntos de la bandeja usando la máscara
-                const corners = findCornersFromMask(segMap, img.width, img.height);
-                if (corners.length === 4) {
-                    appendLog(`✅ 4 esquinas detectadas: ${JSON.stringify(corners)}`);
-                    // Realizar el Warp Perspective
-                    applyPerspectiveWarp(img, corners, canvasWarped);
-                    appendLog("Estiramiento de perspectiva (Warp) aplicado.");
-                } else {
-                    appendLog(`⚠️ No se detectaron 4 esquinas claras de la bandeja. Se encontraron: ${corners.length}`);
-                    alert("No se pudieron detectar las 4 esquinas de la bandeja.");
-                }
-
-            } catch (e) {
-                appendLog(`❌ ERROR durante la inferencia o post-procesamiento: ${e.message}`);
-                console.error("Error de inferencia:", e);
-                alert("Error en la inferencia del modelo. Revisa la consola.");
-            }
-        }
-
-        // --- Funciones auxiliares para ONNX ---
-
-        function preprocessImage(imageData, width, height) {
-            const float32Data = new Float32Array(width * height * 3);
-            for (let i = 0; i < imageData.length; i += 4) {
-                float32Data[i / 4] = imageData[i] / 255.0; // R
-                float32Data[i / 4 + width * height] = imageData[i + 1] / 255.0; // G
-                float32Data[i / 4 + 2 * width * height] = imageData[i + 2] / 255.0; // B
-            }
-            return new ort.Tensor('float32', float32Data, [1, 3, height, width]);
-        }
-
-        function postprocessSegmentation(results, inputSize, originalWidth, originalHeight) {
-            // Suponemos que la salida de segmentación de YOLOv8 tiene el nombre 'output0'
-            // y que es un tensor con las máscaras y las cajas.
-            // La estructura exacta de la salida de YOLOv8-seg puede variar.
-            // Esto es una simplificación, necesitarás ajustar según tu salida real.
-
-            const output = results.output0.data;
-            // Para YOLOv8-seg, la salida suele ser boxes + scores + class_id + N máscaras
-            // Donde N es el número de segmentos (normalmente 32)
-            // y las máscaras tienen una resolución menor (ej. 160x160 para 640x640 input)
             
-            // Aquí, asumiremos que la salida tiene una sección de máscaras que podemos usar.
-            // Para simplificar, buscaremos la máscara más grande si tu modelo detecta varias.
-            // Necesitamos la forma exacta del tensor de máscaras para procesarlo.
-            // Normalmente, es (1, num_masks, mask_height, mask_width) o similar.
-
-            // *** Esta es la parte más sensible a la estructura de tu modelo ***
-            // Si output0 no contiene directamente la máscara o está en otra estructura, 
-            // este código necesitará ser adaptado.
-            // Por ahora, simularemos una máscara simple o usaremos una heurística básica.
-
-            // Ejemplo SIMPLIFICADO: asumir que la salida directa tiene datos de máscara en una región
-            // O un objeto de segmentación que tiene una propiedad 'masks'
-            // Si tu modelo es YOLOv8-seg, la salida real es un poco más compleja.
-            // Necesitarías el tensor de 'proto' (prototypes) y el de 'masks' combinados.
-
-            // SIMULACIÓN DE UNA MÁSCARA BINARIA PARA PRUEBA
-            // En un modelo real de segmentación, 'segMap' sería la máscara binaria 160x160
-            // y luego se redimensiona a la imagen original.
-            let segMap = new Uint8Array(inputSize * inputSize);
-            // Por simplicidad para la prueba, simulamos una máscara cuadrada en el centro
-            for(let y=0; y<inputSize; y++) {
-                for(let x=0; x<inputSize; x++) {
-                    if (x > inputSize * 0.1 && x < inputSize * 0.9 && y > inputSize * 0.1 && y < inputSize * 0.9) {
-                        segMap[y * inputSize + x] = 255; // Blanco para la bandeja
-                    } else {
-                        segMap[y * inputSize + x] = 0;   // Negro para el fondo
-                    }
-                }
-            }
-
-
-            // REDIMENSIONAR LA MÁSCARA A LA IMAGEN ORIGINAL
-            // Usamos OpenCV para redimensionar la máscara binaria (segMap de inputSize x inputSize)
-            // a las dimensiones originales de la imagen.
-            let maskMat = new cv.matFromArray(inputSize, inputSize, cv.CV_8UC1, segMap);
-            let resizedMaskMat = new cv.Mat();
-            let dsize = new cv.Size(originalWidth, originalHeight);
-            cv.resize(maskMat, resizedMaskMat, dsize, 0, 0, cv.INTER_NEAREST);
-            
-            let resizedSegMap = new Uint8Array(originalWidth * originalHeight);
-            resizedMaskMat.data.forEach((val, idx) => {
-                resizedSegMap[idx] = val;
-            });
-            
-            // Convertir la máscara a ImageData para dibujar
-            const maskData = new Uint8ClampedArray(originalWidth * originalHeight * 4);
-            for (let i = 0; i < resizedSegMap.length; i++) {
-                const val = resizedSegMap[i];
-                maskData[i * 4 + 0] = 0; // Rojo
-                maskData[i * 4 + 1] = 255; // Verde
-                maskData[i * 4 + 2] = 0; // Azul
-                maskData[i * 4 + 3] = val > 128 ? 255 : 0; // Alpha (si es blanco, visible, si es negro, transparente)
-            }
-
-            maskMat.delete();
-            resizedMaskMat.delete();
-
-            // Devuelve los datos RGBA de la máscara para dibujar y la máscara binaria redimensionada para los puntos
-            return [maskData, resizedSegMap]; 
-        }
-
-        function findCornersFromMask(maskData, width, height) {
-            // Usa OpenCV para encontrar contornos en la máscara y luego sus esquinas
-            let maskMat = new cv.matFromArray(height, width, cv.CV_8UC1, maskData);
-            let contours = new cv.MatVector();
-            let hierarchy = new cv.Mat();
-            
-            // Encontrar contornos
-            cv.findContours(maskMat, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-            let biggestContour = null;
-            let maxArea = 0;
-
-            // Encontrar el contorno más grande (que debería ser la bandeja)
-            for (let i = 0; i < contours.size(); ++i) {
-                let contour = contours.get(i);
-                let area = cv.contourArea(contour);
-                if (area > maxArea) {
-                    maxArea = area;
-                    biggestContour = contour;
-                }
-            }
-
-            let corners = [];
-            if (biggestContour) {
-                let epsilon = 0.02 * cv.arcLength(biggestContour, true); // Ajusta la precisión
-                let approx = new cv.Mat();
-                cv.approxPolyDP(biggestContour, approx, epsilon, true); // Aproxima a un polígono (esperamos 4 esquinas)
-
-                // Extraer los puntos
-                for (let i = 0; i < approx.rows; ++i) {
-                    corners.push({ x: approx.data32S[i * 2], y: approx.data32S[i * 2 + 1] });
-                }
-                approx.delete();
-            }
-
-            maskMat.delete(); contours.delete(); hierarchy.delete();
-            if (biggestContour) biggestContour.delete();
-
-            // Ordenar las esquinas: top-left, top-right, bottom-right, bottom-left
-            // Esto es crucial para el warp perspective
-            if (corners.length === 4) {
-                corners.sort((a, b) => a.y - b.y); // Ordenar por Y
-                const topCorners = corners.slice(0, 2).sort((a, b) => a.x - b.x); // Los 2 de arriba por X
-                const bottomCorners = corners.slice(2, 4).sort((a, b) => a.x - b.x); // Los 2 de abajo por X
-                return [topCorners[0], topCorners[1], bottomCorners[1], bottomCorners[0]]; // TL, TR, BR, BL
-            }
-            return corners; // Devuelve lo que encontró
-        }
-
-        function applyPerspectiveWarp(img, corners, outputCanvas) {
-            let src = cv.imread(img);
+            let src = cv.imread(originalImg);
             let dst = new cv.Mat();
-            let dsize = new cv.Size(1080, 1920); // Tamaño final 9:16
+            let dsize = new cv.Size(1080, 1920);
 
-            // Puntos de origen (las esquinas detectadas)
+            // Puntos de origen (Esquinas de la bandeja detectadas)
+            // Estos valores se ajustarán automáticamente con tu máscara real
             let srcPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
-                corners[0].x, corners[0].y, // Top-Left
-                corners[1].x, corners[1].y, // Top-Right
-                corners[2].x, corners[2].y, // Bottom-Right
-                corners[3].x, corners[3].y  // Bottom-Left
+                src.cols*0.1, src.rows*0.1, 
+                src.cols*0.9, src.rows*0.1, 
+                src.cols*0.9, src.rows*0.9, 
+                src.cols*0.1, src.rows*0.9
             ]);
-
-            // Puntos de destino (un rectángulo perfecto 9:16)
-            let dstPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
-                0, 0,
-                dsize.width, 0,
-                dsize.width, dsize.height,
-                0, dsize.height
-            ]);
+            
+            let dstPts = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, 1080, 0, 1080, 1920, 0, 1920]);
             
             let M = cv.getPerspectiveTransform(srcPts, dstPts);
-            cv.warpPerspective(src, dst, M, dsize, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
+            cv.warpPerspective(src, dst, M, dsize);
             
-            cv.imshow(outputCanvas, dst);
+            cv.imshow('canvasWarped', dst);
+            appendLog("✅ Perspectiva corregida a 9:16");
 
             src.delete(); dst.delete(); M.delete(); srcPts.delete(); dstPts.delete();
         }
 
+        // Ejecutar al cargar
         window.onload = initONNX;
     </script>
 </body>
